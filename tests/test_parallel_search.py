@@ -265,11 +265,11 @@ async def test_timeout_and_cancellation(permissions, monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("confirmation", [False, True])
+@pytest.mark.parametrize("confirmation", [False, True, "reject"])
 async def test_scripted_agent_loop_and_confirmation_pause(permissions, monkeypatch, confirmation):
     """Scripted OpenAI responses exercise Agent.arun without real model inference."""
     permissions.settings_file.write_text(
-        f"external_tool_access:\n  enabled: true\n  require_confirmation: {str(confirmation).lower()}\n"
+        f"external_tool_access:\n  enabled: true\n  require_confirmation: {str(bool(confirmation)).lower()}\n"
     )
     server = MCPFixture()
     server.install(monkeypatch)
@@ -279,7 +279,10 @@ async def test_scripted_agent_loop_and_confirmation_pause(permissions, monkeypat
         body = json.loads(request.content)
         model_requests.append(body)
         tools = [message for message in body["messages"] if message["role"] == "tool"]
-        if not tools:
+        if tools and confirmation == "reject":
+            assert not server.requests
+            message = {"role": "assistant", "content": "Search was declined."}
+        elif not tools:
             names = {item["function"]["name"] for item in body["tools"]}
             assert names == {"parallel_web_search", "parallel_web_fetch"}
             message = {
@@ -326,7 +329,11 @@ async def test_scripted_agent_loop_and_confirmation_pause(permissions, monkeypat
                 "created": 1,
                 "model": "scripted-fixture",
                 "choices": [
-                    {"index": 0, "message": message, "finish_reason": "tool_calls" if len(tools) < 2 else "stop"}
+                    {
+                        "index": 0,
+                        "message": message,
+                        "finish_reason": "tool_calls" if message.get("tool_calls") else "stop",
+                    }
                 ],
                 "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
             },
@@ -337,11 +344,24 @@ async def test_scripted_agent_loop_and_confirmation_pause(permissions, monkeypat
         assembled = context()
         agent = Agent(model=model, tools=assembled.tools, instructions=assembled.instructions, telemetry=False)
         response = await agent.arun("Find research and cite it", session_id=RUN_CONTEXT.session_id)
-    if confirmation:
-        assert response.is_paused
-        assert response.requirements[0].needs_confirmation
+        if confirmation:
+            assert response.is_paused
+            assert response.requirements[0].needs_confirmation
+            assert server.requests == []
+            assert len(model_requests) == 1
+            while response.is_paused:
+                for requirement in response.requirements:
+                    if not requirement.needs_confirmation:
+                        continue
+                    if confirmation == "reject":
+                        requirement.reject()
+                    else:
+                        requirement.confirm()
+                response = await agent.acontinue_run(response, requirements=response.requirements)
+    if confirmation == "reject":
+        assert response.content == "Search was declined."
         assert server.requests == []
-        assert len(model_requests) == 1
+        assert len(model_requests) == 2
     else:
         assert SOURCE_URL in response.content
         assert [call["name"] for call in server.calls] == ["web_search", "web_fetch"]
