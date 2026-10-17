@@ -350,14 +350,12 @@ async def test_scripted_agent_loop_and_confirmation_pause(permissions, monkeypat
             assert server.requests == []
             assert len(model_requests) == 1
             while response.is_paused:
-                for requirement in response.requirements:
-                    if not requirement.needs_confirmation:
-                        continue
-                    if confirmation == "reject":
-                        requirement.reject()
-                    else:
-                        requirement.confirm()
-                response = await agent.acontinue_run(response, requirements=response.requirements)
+                # Agno 2.3.12 continuations expose each newly paused call in
+                # RunOutput.tools; requirements may also retain earlier calls.
+                for pending in response.tools:
+                    if pending.requires_confirmation and pending.result is None:
+                        pending.confirmed = confirmation != "reject"
+                response = await agent.acontinue_run(response)
     if confirmation == "reject":
         assert response.content == "Search was declined."
         assert server.requests == []
